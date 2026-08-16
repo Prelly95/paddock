@@ -1,0 +1,19 @@
+# PX4 parameters applied to a running SITL instance by `just sim-params`.
+# One "NAME VALUE" per line; blank lines and # comments ignored.
+#
+# These exist because a ROS-driven SITL sortie has no ground control station
+# and no RC transmitter, which several PX4 defaults assume are present. None
+# of these should be carried over to a real aircraft — each one disables a
+# link-loss protection that matters once there's hardware in the air.
+
+# Without this, arming is blocked in ALL modes whenever no GCS is connected:
+# rcAndDataLinkCheck.cpp makes a GCS link mandatory for arming whenever
+# NAV_DLL_ACT > 0, and the standard_vtol airframe ships with NAV_DLL_ACT=2
+# (Return on data-link loss). Presents as "Resolve system health failures"
+# with no indication that the missing piece is QGroundControl.
+NAV_DLL_ACT 0
+
+# Precautionary, not yet observed to be required: exempt Mission (bit 0),
+# Hold (bit 1) and Offboard (bit 2) from the RC-loss failsafe, so a vehicle
+# that never had an RC link can't be dropped out of offboard mid-inspection.
+COM_RCL_EXCEPT 7

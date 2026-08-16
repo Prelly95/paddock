@@ -1,0 +1,36 @@
+services:
+  paddock:
+    build: .
+    image: paddock:latest
+    container_name: paddock
+    # host networking keeps the uXRCE-DDS agent (UDP 8888) and PX4's SITL
+    # client on the same loopback, and lets DDS discovery work without
+    # publishing a port range.
+    network_mode: host
+    devices:
+      # Intel integrated graphics: pass the render node straight through.
+      # `--gpus` is NVIDIA-only and does nothing here.
+      - /dev/dri:/dev/dri
+    environment:
+      - DISPLAY=${DISPLAY}
+      # Under --net=host, Gazebo Transport's multicast discovery fails without
+      # NET_ADMIN. Pinning it to loopback + a named partition sidesteps that.
+      - GZ_IP=127.0.0.1
+      - GZ_PARTITION=paddock
+      - CCACHE_DIR=/home/ubuntu/.ccache
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix
+      # ROS 2 workspace. Note /home/ubuntu, not /root — the image runs as the
+      # uid-1000 `ubuntu` user so files here stay owned by you on the host.
+      - ./ws:/home/ubuntu/ros2_ws
+      # PX4-Autopilot source tree, cloned by `just px4-clone`.
+      - ./px4:/home/ubuntu/PX4-Autopilot
+      # Named volume so a PX4 rebuild after `just rebuild` isn't a 20-minute
+      # cold compile. Seeded from the image dir, so it's ubuntu-owned.
+      - paddock-ccache:/home/ubuntu/.ccache
+    stdin_open: true
+    tty: true
+    command: bash
+
+volumes:
+  paddock-ccache:

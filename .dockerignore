@@ -1,0 +1,9 @@
+# The image is built from the Dockerfile + docker/ only. Everything the
+# container works on (ws/, px4/) arrives as a bind mount at runtime, so
+# keeping it out of the build context matters: a cloned PX4-Autopilot is
+# several GB and would be uploaded to the daemon on every build.
+ws/
+px4/
+docs/
+.git
+*.md

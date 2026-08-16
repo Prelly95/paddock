@@ -1,0 +1,20 @@
+/**:
+  ros__parameters:
+    # Paddock positions as local NE offsets from the launch point, in metres.
+    # A ~1.5 km circuit: far enough that fixed-wing cruise is doing real work
+    # between stops, short enough that a full sortie fits in a few minutes of
+    # sim time when you're iterating.
+    paddocks_north_m: [400.0, 800.0, 300.0]
+    paddocks_east_m:  [200.0, -300.0, -700.0]
+
+    takeoff_alt_m: 40.0
+    cruise_alt_m: 80.0
+    inspect_alt_m: 30.0
+
+    # Must stay above PX4's NAV_LOITER_RAD (default 80 m) — see the comment in
+    # mission_node.cpp; too tight and the aircraft orbits a paddock forever.
+    accept_radius_m: 120.0
+
+    hover_tolerance_m: 3.0
+    inspect_dwell_s: 10.0
+    command_retry_s: 2.0

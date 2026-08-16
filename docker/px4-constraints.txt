@@ -1,0 +1,9 @@
+# pip constraints applied while installing PX4's Python requirements.
+#
+# PX4's requirements.txt asks for `numpy>=1.13`, which on its own resolves to
+# numpy 2.x. ROS 2 Jazzy's C-extension Python packages are built against the
+# numpy 1.26 that ships with Ubuntu 24.04, and a pip-installed numpy 2.x lands
+# in /usr/local/lib/python3.12/dist-packages, which shadows the apt one on
+# sys.path. The result is import errors in rclpy-adjacent packages that are
+# genuinely annoying to trace back to this line. Pin it.
+numpy<2
