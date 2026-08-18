@@ -15,6 +15,18 @@
     # mission_node.cpp; too tight and the aircraft orbits a paddock forever.
     accept_radius_m: 120.0
 
+    # Groundspeed required before commanding the front transition. Must stay
+    # BELOW MPC_XY_CRUISE (5 m/s) -- a multirotor in AUTO cannot exceed it, so
+    # a higher threshold never triggers. Departing at ~5 m/s is enough momentum
+    # to clear VT_ARSP_BLEND before PX4's transition deadline; from a standing
+    # hover it peaks around 6.1 m/s and quad-chutes.
+    transition_speed_m_s: 4.5
+
+    # Nose must point within this of the paddock before transitioning. The
+    # pusher and the pitot both act along body-X, so sideways groundspeed does
+    # not count as airspeed -- measured 51 deg of crab across a whole leg.
+    heading_tolerance_deg: 15.0
+
     hover_tolerance_m: 3.0
     inspect_dwell_s: 10.0
     command_retry_s: 2.0

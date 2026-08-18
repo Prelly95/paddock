@@ -2,8 +2,8 @@
 //
 // Drives a PX4 standard_vtol through a farm inspection sortie:
 //
-//   arm -> MC takeoff -> transition FW -> [cruise to paddock -> transition MC
-//   -> offboard hover & inspect -> transition FW] xN -> RTL
+//   arm -> MC takeoff -> [depart toward paddock -> transition FW -> cruise
+//   -> transition MC -> offboard hover & inspect] xN -> RTL
 //
 // Division of labour (the central design decision here): PX4's navigator owns
 // guidance during fixed-wing cruise, commanded via DO_REPOSITION. This node
@@ -25,6 +25,7 @@
 #include <px4_msgs/msg/offboard_control_mode.hpp>
 #include <px4_msgs/msg/trajectory_setpoint.hpp>
 #include <px4_msgs/msg/vehicle_command.hpp>
+#include <px4_msgs/msg/vehicle_command_ack.hpp>
 #include <px4_msgs/msg/vehicle_local_position.hpp>
 #include <px4_msgs/msg/vehicle_status.hpp>
 #include <px4_msgs/msg/vtol_vehicle_status.hpp>
@@ -47,6 +48,13 @@ constexpr float kCustomSubModeAutoRtl = 5.0f;
 constexpr float kVtolStateMc = 3.0f;
 constexpr float kVtolStateFw = 4.0f;
 
+// MAV_DO_REPOSITION_FLAGS bit 0. Without it PX4's commander takes the
+// "mode switch not requested" branch, acks UNSUPPORTED and never switches to
+// AUTO_LOITER. The navigator still consumes the coordinates, so the vehicle
+// appears to comply whenever it is already loitering -- and silently ignores
+// the command when it is not, e.g. on the way out of an offboard leg.
+constexpr float kRepositionChangeMode = 1.0f;
+
 constexpr double kEarthRadiusM = 6371000.0;
 
 enum class Phase
@@ -54,6 +62,7 @@ enum class Phase
   WaitForFcu,
   Arm,
   Takeoff,
+  Depart,
   TransitionFw,
   Cruise,
   TransitionMc,
@@ -69,6 +78,7 @@ const char * phase_name(Phase p)
     case Phase::WaitForFcu:    return "WAIT_FOR_FCU";
     case Phase::Arm:           return "ARM";
     case Phase::Takeoff:       return "TAKEOFF";
+    case Phase::Depart:        return "DEPART";
     case Phase::TransitionFw:  return "TRANSITION_FW";
     case Phase::Cruise:        return "CRUISE";
     case Phase::TransitionMc:  return "TRANSITION_MC";
@@ -78,6 +88,34 @@ const char * phase_name(Phase p)
     case Phase::Done:          return "DONE";
   }
   return "UNKNOWN";
+}
+
+const char * command_name(uint32_t cmd)
+{
+  using VC = px4_msgs::msg::VehicleCommand;
+  switch (cmd) {
+    case VC::VEHICLE_CMD_COMPONENT_ARM_DISARM: return "ARM_DISARM";
+    case VC::VEHICLE_CMD_NAV_TAKEOFF:          return "NAV_TAKEOFF";
+    case VC::VEHICLE_CMD_DO_VTOL_TRANSITION:   return "DO_VTOL_TRANSITION";
+    case VC::VEHICLE_CMD_DO_REPOSITION:        return "DO_REPOSITION";
+    case VC::VEHICLE_CMD_DO_SET_MODE:          return "DO_SET_MODE";
+    default:                                   return "OTHER";
+  }
+}
+
+const char * ack_result_name(uint8_t r)
+{
+  using ACK = px4_msgs::msg::VehicleCommandAck;
+  switch (r) {
+    case ACK::VEHICLE_CMD_RESULT_ACCEPTED:              return "ACCEPTED";
+    case ACK::VEHICLE_CMD_RESULT_TEMPORARILY_REJECTED:  return "TEMPORARILY_REJECTED";
+    case ACK::VEHICLE_CMD_RESULT_DENIED:                return "DENIED";
+    case ACK::VEHICLE_CMD_RESULT_UNSUPPORTED:           return "UNSUPPORTED";
+    case ACK::VEHICLE_CMD_RESULT_FAILED:                return "FAILED";
+    case ACK::VEHICLE_CMD_RESULT_IN_PROGRESS:           return "IN_PROGRESS";
+    case ACK::VEHICLE_CMD_RESULT_CANCELLED:             return "CANCELLED";
+    default:                                            return "UNKNOWN";
+  }
 }
 
 class MissionNode : public rclcpp::Node
@@ -113,6 +151,24 @@ public:
       [this](px4_msgs::msg::VtolVehicleStatus::SharedPtr msg) {
         vtol_ = *msg;
         have_vtol_ = true;
+      });
+
+    // Without this, every command is fire-and-forget: a rejected DO_REPOSITION
+    // is indistinguishable from an accepted one that the vehicle ignored.
+    ack_sub_ = create_subscription<px4_msgs::msg::VehicleCommandAck>(
+      "/fmu/out/vehicle_command_ack", px4_qos,
+      [this](px4_msgs::msg::VehicleCommandAck::SharedPtr msg) {
+        const bool ok =
+          msg->result == px4_msgs::msg::VehicleCommandAck::VEHICLE_CMD_RESULT_ACCEPTED;
+        if (ok) {
+          RCLCPP_INFO(
+            get_logger(), "ack: %s ACCEPTED", command_name(msg->command));
+        } else {
+          RCLCPP_WARN(
+            get_logger(), "ack: %s -> %s (reason=%u)",
+            command_name(msg->command), ack_result_name(msg->result),
+            msg->result_param1);
+        }
       });
 
     // Commands out to PX4. Default (reliable) QoS is fine here: a reliable
@@ -166,6 +222,24 @@ private:
     accept_radius_ = declare_parameter<double>("accept_radius_m", 120.0);
 
     // Tolerance for "settled over the paddock" once in offboard hover.
+    // Groundspeed required before a front transition is commanded.
+    //
+    // This must sit BELOW the multirotor cruise speed, not above the airspeed
+    // the transition needs: in AUTO modes a multirotor tracks MPC_XY_CRUISE
+    // (5 m/s by default, hard-capped by MPC_XY_VEL_MAX at 8), so any threshold
+    // at or above that is simply unreachable and the departure never ends.
+    // The point is only to leave the hover with real momentum -- entering the
+    // transition at ~5 m/s clears VT_ARSP_BLEND (8 m/s) inside the
+    // VT_F_TRANS_DUR window comfortably, where starting from 0 m/s peaked at
+    // 6.1 m/s and quad-chuted.
+    transition_speed_ = declare_parameter<double>("transition_speed_m_s", 4.5);
+    // How closely the nose must point at the paddock before transitioning.
+    // A multirotor translates in any direction regardless of heading, but the
+    // pusher accelerates along body-X and the pitot measures along body-X --
+    // so groundspeed only becomes useful airspeed to the extent the nose is
+    // aligned with it. Crabbing 51 degrees off course, as measured, throws
+    // away cos(51) = 37% of the departure speed.
+    heading_tolerance_ = declare_parameter<double>("heading_tolerance_deg", 15.0);
     hover_tolerance_ = declare_parameter<double>("hover_tolerance_m", 3.0);
     dwell_s_ = declare_parameter<double>("inspect_dwell_s", 10.0);
     cmd_retry_s_ = declare_parameter<double>("command_retry_s", 2.0);
@@ -218,6 +292,26 @@ private:
     lat = local_pos_.ref_lat + (north / kEarthRadiusM) * 180.0 / M_PI;
     lon = local_pos_.ref_lon +
       (east / (kEarthRadiusM * std::cos(ref_lat_rad))) * 180.0 / M_PI;
+  }
+
+  // Bearing from the vehicle to a local NE point, radians in NED (0 = north).
+  double bearing_to(double north, double east) const
+  {
+    return std::atan2(east - local_pos_.y, north - local_pos_.x);
+  }
+
+  // Absolute angle between where the nose points and where the target is.
+  double heading_error_to(double north, double east) const
+  {
+    double err = bearing_to(north, east) - local_pos_.heading;
+    while (err > M_PI) {err -= 2.0 * M_PI;}
+    while (err < -M_PI) {err += 2.0 * M_PI;}
+    return std::abs(err);
+  }
+
+  double groundspeed() const
+  {
+    return std::hypot(local_pos_.vx, local_pos_.vy);
   }
 
   double horizontal_distance_to(double north, double east) const
@@ -301,6 +395,7 @@ private:
       case Phase::WaitForFcu:    run_wait_for_fcu();    break;
       case Phase::Arm:           run_arm();             break;
       case Phase::Takeoff:       run_takeoff();         break;
+      case Phase::Depart:        run_depart();          break;
       case Phase::TransitionFw:  run_transition_fw();   break;
       case Phase::Cruise:        run_cruise();          break;
       case Phase::TransitionMc:  run_transition_mc();   break;
@@ -365,6 +460,76 @@ private:
     const double altitude = -local_pos_.z;
     if (altitude >= takeoff_alt_ * 0.95) {
       RCLCPP_INFO(get_logger(), "Takeoff complete at %.1f m AGL", altitude);
+      set_phase(Phase::Depart);
+    }
+  }
+
+  // A front transition commanded from a stationary hover does not survive.
+  // PX4 allows VT_F_TRANS_DUR (5 s) to reach VT_ARSP_BLEND (8 m/s) and
+  // quad-chutes the instant that window closes short. Starting from a dead
+  // hover in AUTO_LOITER, the multirotor position controller resists the
+  // forward acceleration and the airframe arrives at the deadline ~2 m/s
+  // light — measured at 6.1 m/s against the 8.0 m/s requirement.
+  //
+  // So reposition toward the paddock while still in multirotor mode and let
+  // the position controller build forward speed first. The transition then
+  // starts with momentum already established, which is the condition a normal
+  // PX4 VTOL mission transitions under.
+  void run_depart()
+  {
+    const double north = paddocks_n_[wp_index_];
+    const double east = paddocks_e_[wp_index_];
+
+    // Nothing to depart for if we are already there. Without this the phase
+    // is degenerate: distance ~0 makes bearing_to() the atan2 of position
+    // noise, so the commanded yaw is random, speed never builds, and neither
+    // gate condition can ever be met -- a permanent stall rather than a
+    // failure. Happens whenever a sortie is resumed over a paddock.
+    if (horizontal_distance_to(north, east) <= accept_radius_) {
+      RCLCPP_INFO(
+        get_logger(), "Already within %.0f m of paddock %zu — skipping cruise",
+        accept_radius_, wp_index_ + 1);
+      set_phase(Phase::TransitionMc);
+      return;
+    }
+
+    if (should_send_command()) {
+      double lat, lon;
+      local_to_global(north, east, lat, lon);
+      // param4 is the yaw setpoint, and it must be in RADIANS despite the
+      // MAVLink spec defining it as degrees. PX4's navigator assigns it
+      // straight into position_setpoint_s::yaw, which is radians, with no
+      // conversion (navigator_main.cpp, the DO_REPOSITION branch) -- unlike
+      // other commands that call math::radians() explicitly. Sending degrees
+      // silently wraps: a 26.57 deg bearing became 26.57 rad = 82.1 deg, and
+      // the aircraft held that heading for an entire leg, crabbing ~56 deg
+      // off course while faithfully obeying the command it was given.
+      //
+      // Nothing catches this: the value is finite and in range, so it is
+      // accepted and acted on. It is only visible by comparing commanded
+      // heading against achieved heading.
+      const double bearing_rad = bearing_to(north, east);
+      send_command(
+        px4_msgs::msg::VehicleCommand::VEHICLE_CMD_DO_REPOSITION,
+        -1.0f, kRepositionChangeMode, 0.0f,
+        static_cast<float>(bearing_rad),
+        lat, lon,
+        static_cast<float>(home_alt_ + cruise_alt_));
+      RCLCPP_INFO_THROTTLE(
+        get_logger(), *get_clock(), 3000,
+        "Departing for paddock %zu | speed %.1f of %.1f m/s | heading err "
+        "%.0f of %.0f deg | pos=(%.0f,%.0f) nav_state=%u",
+        wp_index_ + 1, groundspeed(), transition_speed_,
+        heading_error_to(north, east) * 180.0 / M_PI, heading_tolerance_,
+        local_pos_.x, local_pos_.y, status_.nav_state);
+    }
+
+    // Both conditions matter: speed alone is useless if it is sideways.
+    const double heading_err_deg = heading_error_to(north, east) * 180.0 / M_PI;
+    if (groundspeed() >= transition_speed_ && heading_err_deg <= heading_tolerance_) {
+      RCLCPP_INFO(
+        get_logger(), "Departure: %.1f m/s, nose %.0f deg off — transitioning",
+        groundspeed(), heading_err_deg);
       set_phase(Phase::TransitionFw);
     }
   }
@@ -392,8 +557,8 @@ private:
       local_to_global(north, east, lat, lon);
       send_command(
         px4_msgs::msg::VehicleCommand::VEHICLE_CMD_DO_REPOSITION,
-        -1.0f,   // ground speed: -1 = use the configured cruise speed
-        0.0f,    // bitmask
+        -1.0f,                   // ground speed: -1 = configured cruise speed
+        kRepositionChangeMode,   // flags: allow the required mode switch
         0.0f,    // loiter radius: 0 = NAV_LOITER_RAD
         NAN,     // yaw: unconstrained
         lat, lon,
@@ -487,7 +652,7 @@ private:
 
     if (status_.nav_state == px4_msgs::msg::VehicleStatus::NAVIGATION_STATE_AUTO_LOITER) {
       if (++wp_index_ < paddocks_n_.size()) {
-        set_phase(Phase::TransitionFw);
+        set_phase(Phase::Depart);
       } else {
         RCLCPP_INFO(get_logger(), "All %zu paddocks inspected", paddocks_n_.size());
         set_phase(Phase::Rtl);
@@ -525,6 +690,8 @@ private:
   std::vector<double> paddocks_n_, paddocks_e_;
   double takeoff_alt_{}, cruise_alt_{}, inspect_alt_{};
   double accept_radius_{}, hover_tolerance_{}, dwell_s_{}, cmd_retry_s_{};
+  double transition_speed_{};
+  double heading_tolerance_{};
 
   px4_msgs::msg::VehicleStatus status_{};
   px4_msgs::msg::VehicleLocalPosition local_pos_{};
@@ -545,6 +712,7 @@ private:
   rclcpp::Subscription<px4_msgs::msg::VehicleStatus>::SharedPtr status_sub_;
   rclcpp::Subscription<px4_msgs::msg::VehicleLocalPosition>::SharedPtr local_pos_sub_;
   rclcpp::Subscription<px4_msgs::msg::VtolVehicleStatus>::SharedPtr vtol_sub_;
+  rclcpp::Subscription<px4_msgs::msg::VehicleCommandAck>::SharedPtr ack_sub_;
   rclcpp::Publisher<px4_msgs::msg::VehicleCommand>::SharedPtr cmd_pub_;
   rclcpp::Publisher<px4_msgs::msg::OffboardControlMode>::SharedPtr offboard_mode_pub_;
   rclcpp::Publisher<px4_msgs::msg::TrajectorySetpoint>::SharedPtr setpoint_pub_;
