@@ -9,6 +9,14 @@
 /ws/install/
 /ws/log/
 
+# Rust build artifacts
+debug/
+target/
+**/*.rs.bk
+*.pdb
+**/mutants.out*/
+rustc-ice-*.txt
+
 # OS / editor cruft
 .DS_Store
 *.swp

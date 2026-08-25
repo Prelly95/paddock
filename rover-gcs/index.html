@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Rover GCS</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+  <header>
+    <h1>ROVER<span class="accent">▚</span>GCS</h1>
+    <span class="sub">PX4 ground control station</span>
+    <div class="header-status">
+      <span class="badge" id="connBadge">disconnected</span>
+      <span class="badge" id="modeBadge">—</span>
+      <span class="badge" id="armBadge">disarmed</span>
+    </div>
+  </header>
+
+  <main>
+    <div class="workspace">
+
+      <!-- camera feed -->
+      <section class="feed-panel" aria-label="Camera feed">
+        <div class="feed-area">
+          <video id="feedVideo" autoplay playsinline muted aria-label="Rover camera feed"></video>
+          <canvas id="feedCanvas" aria-hidden="true"></canvas>
+          <div class="feed-overlay" id="feedOverlay">
+            <span class="feed-msg">no feed — configure stream URL</span>
+          </div>
+          <div class="feed-hud">
+            <span class="hud-item" id="hudAlt">ALT <b>—</b></span>
+            <span class="hud-item" id="hudSpd">SPD <b>—</b></span>
+            <span class="hud-item" id="hudBat">BAT <b>—</b></span>
+            <span class="hud-item" id="hudSat">SAT <b>—</b></span>
+          </div>
+        </div>
+      </section>
+
+      <!-- divider -->
+      <div class="divider" id="divider" role="separator" aria-label="Resize panels"></div>
+
+      <!-- control panel -->
+      <aside class="control-panel" aria-label="Control panel">
+        <div class="tabs-nav" role="tablist">
+          <button class="tab-btn" role="tab" aria-selected="true"  data-tab="tabConn">connection</button>
+          <button class="tab-btn" role="tab" aria-selected="false" data-tab="tabMission">mission</button>
+          <button class="tab-btn" role="tab" aria-selected="false" data-tab="tabParams">params</button>
+        </div>
+
+        <!-- connection tab -->
+        <div id="tabConn" class="tab-panel" role="tabpanel">
+          <div class="group">
+            <h2>MAVLink</h2>
+            <div class="field">
+              <label for="mavHost">host</label>
+              <input id="mavHost" type="text" value="127.0.0.1" spellcheck="false" aria-label="MAVLink host">
+            </div>
+            <div class="field">
+              <label for="mavPort">port</label>
+              <input id="mavPort" type="number" value="8765" min="1" max="65535" aria-label="MAVLink port">
+            </div>
+            <div class="field">
+              <label for="mavProto">protocol</label>
+              <select id="mavProto" aria-label="MAVLink protocol">
+                <option value="udp">UDP</option>
+                <option value="tcp">TCP</option>
+                <option value="serial">Serial</option>
+              </select>
+            </div>
+            <div class="btn-group">
+              <button class="btn primary" id="btnConnect">connect</button>
+              <button class="btn danger" id="btnDisconnect" disabled>disconnect</button>
+            </div>
+          </div>
+
+          <div class="group">
+            <h2>Video stream</h2>
+            <div class="field">
+              <label for="streamUrl">URL</label>
+              <input id="streamUrl" type="text" placeholder="ws://192.168.1.1:8765" spellcheck="false" aria-label="Video stream URL">
+            </div>
+            <div class="field">
+              <label for="streamType">type</label>
+              <select id="streamType" aria-label="Stream type">
+                <option value="mjpeg">MJPEG</option>
+                <option value="webrtc">WebRTC</option>
+                <option value="ws">WebSocket</option>
+              </select>
+            </div>
+            <button class="btn" id="btnStream">start stream</button>
+          </div>
+
+          <div class="group">
+            <h2>Vehicle</h2>
+            <div class="field">
+              <label for="sysId">sys ID</label>
+              <input id="sysId" type="number" value="1" min="1" max="255" aria-label="System ID">
+            </div>
+            <div class="field">
+              <label for="compId">comp ID</label>
+              <input id="compId" type="number" value="1" min="1" max="255" aria-label="Component ID">
+            </div>
+          </div>
+        </div>
+
+        <!-- mission tab -->
+        <div id="tabMission" class="tab-panel" role="tabpanel" hidden>
+          <div class="group">
+            <h2>Flight mode</h2>
+            <div class="field">
+              <label for="flightMode">mode</label>
+              <select id="flightMode" aria-label="Flight mode">
+                <option value="MANUAL">MANUAL</option>
+                <option value="ACRO">ACRO</option>
+                <option value="STABILIZED">STABILIZED</option>
+                <option value="ALTCTL">ALTCTL</option>
+                <option value="POSCTL">POSCTL</option>
+                <option value="AUTO.MISSION">AUTO.MISSION</option>
+                <option value="AUTO.RTL">AUTO.RTL</option>
+                <option value="AUTO.LOITER">AUTO.LOITER</option>
+                <option value="OFFBOARD">OFFBOARD</option>
+              </select>
+            </div>
+            <button class="btn" id="btnSetMode">set mode</button>
+          </div>
+
+          <div class="group">
+            <h2>Arm / disarm</h2>
+            <div class="btn-group">
+              <button class="btn primary" id="btnArm">arm</button>
+              <button class="btn danger"  id="btnDisarm">disarm</button>
+            </div>
+          </div>
+
+          <div class="group">
+            <h2>Waypoint</h2>
+            <div class="field">
+              <label for="wpLat">lat</label>
+              <input id="wpLat" type="number" step="0.000001" placeholder="0.000000" aria-label="Waypoint latitude">
+            </div>
+            <div class="field">
+              <label for="wpLon">lon</label>
+              <input id="wpLon" type="number" step="0.000001" placeholder="0.000000" aria-label="Waypoint longitude">
+            </div>
+            <div class="field">
+              <label for="wpAlt">alt (m)</label>
+              <input id="wpAlt" type="number" value="10" step="0.5" aria-label="Waypoint altitude">
+            </div>
+            <button class="btn" id="btnGoTo">go to waypoint</button>
+          </div>
+        </div>
+
+        <!-- params tab -->
+        <div id="tabParams" class="tab-panel" role="tabpanel" hidden>
+          <div class="group">
+            <h2>Parameter</h2>
+            <div class="field">
+              <label for="paramName">name</label>
+              <input id="paramName" type="text" placeholder="MPC_XY_VEL_MAX" spellcheck="false" aria-label="Parameter name">
+            </div>
+            <div class="field">
+              <label for="paramVal">value</label>
+              <input id="paramVal" type="number" step="any" placeholder="0" aria-label="Parameter value">
+            </div>
+            <div class="btn-group">
+              <button class="btn" id="btnGetParam">get</button>
+              <button class="btn primary" id="btnSetParam">set</button>
+            </div>
+          </div>
+
+          <div class="group">
+            <h2>Quick params</h2>
+            <ul class="param-list" id="paramList" aria-label="Quick parameter list">
+              <li class="param-item" data-param="MPC_XY_VEL_MAX">
+                <span class="param-name">MPC_XY_VEL_MAX</span>
+                <input class="param-quick" type="number" step="any" aria-label="MPC_XY_VEL_MAX value">
+              </li>
+              <li class="param-item" data-param="MPC_Z_VEL_MAX_UP">
+                <span class="param-name">MPC_Z_VEL_MAX_UP</span>
+                <input class="param-quick" type="number" step="any" aria-label="MPC_Z_VEL_MAX_UP value">
+              </li>
+              <li class="param-item" data-param="MPC_LAND_SPEED">
+                <span class="param-name">MPC_LAND_SPEED</span>
+                <input class="param-quick" type="number" step="any" aria-label="MPC_LAND_SPEED value">
+              </li>
+              <li class="param-item" data-param="MC_ROLL_P">
+                <span class="param-name">MC_ROLL_P</span>
+                <input class="param-quick" type="number" step="any" aria-label="MC_ROLL_P value">
+              </li>
+              <li class="param-item" data-param="MC_PITCH_P">
+                <span class="param-name">MC_PITCH_P</span>
+                <input class="param-quick" type="number" step="any" aria-label="MC_PITCH_P value">
+              </li>
+              <li class="param-item" data-param="MC_YAW_P">
+                <span class="param-name">MC_YAW_P</span>
+                <input class="param-quick" type="number" step="any" aria-label="MC_YAW_P value">
+              </li>
+            </ul>
+            <button class="btn primary" id="btnSendQuick">send all</button>
+          </div>
+        </div>
+      </aside>
+    </div>
+
+    <!-- telemetry bar -->
+    <div class="telem-bar">
+
+      <!-- minimap -->
+      <div class="telem-card telem-card--map" aria-label="Mini map">
+        <div class="telem-label">position</div>
+        <canvas id="minimapCanvas" width="160" height="130" aria-label="Position map"></canvas>
+      </div>
+
+      <!-- attitude indicator -->
+      <div class="telem-card" aria-label="Attitude indicator">
+        <div class="telem-label">attitude</div>
+        <div class="adi-wrap">
+          <canvas id="adiCanvas" width="120" height="120" aria-label="Artificial horizon"></canvas>
+        </div>
+        <div class="adi-vals">
+          <span class="tval"><span class="tlabel">R</span><span id="valRoll">0.0°</span></span>
+          <span class="tval"><span class="tlabel">P</span><span id="valPitch">0.0°</span></span>
+        </div>
+      </div>
+
+      <!-- compass -->
+      <div class="telem-card" aria-label="Compass">
+        <div class="telem-label">heading</div>
+        <div class="compass-wrap">
+          <canvas id="compassCanvas" width="120" height="120" aria-label="Compass"></canvas>
+        </div>
+        <div class="tval-center" id="valHeading">000°</div>
+      </div>
+
+      <!-- wind -->
+      <div class="telem-card" aria-label="Wind">
+        <div class="telem-label">wind</div>
+        <div class="wind-wrap">
+          <canvas id="windCanvas" width="120" height="120" aria-label="Wind direction"></canvas>
+        </div>
+        <div class="adi-vals">
+          <span class="tval"><span class="tlabel">DIR</span><span id="valWindDir">—°</span></span>
+          <span class="tval"><span class="tlabel">SPD</span><span id="valWindSpd">— m/s</span></span>
+        </div>
+      </div>
+
+      <!-- position / nav -->
+      <div class="telem-card telem-card--wide" aria-label="Position">
+        <div class="telem-label">navigation</div>
+        <div class="nav-grid">
+          <span class="tval"><span class="tlabel">LAT</span><span id="valLat">—</span></span>
+          <span class="tval"><span class="tlabel">LON</span><span id="valLon">—</span></span>
+          <span class="tval"><span class="tlabel">ALT</span><span id="valAlt">— m</span></span>
+          <span class="tval"><span class="tlabel">GND SPD</span><span id="valGndSpd">— m/s</span></span>
+          <span class="tval"><span class="tlabel">VSPD</span><span id="valVSpd">— m/s</span></span>
+          <span class="tval"><span class="tlabel">HDOP</span><span id="valHdop">—</span></span>
+        </div>
+      </div>
+
+      <!-- system health -->
+      <div class="telem-card telem-card--wide" aria-label="System health">
+        <div class="telem-label">system</div>
+        <div class="nav-grid">
+          <span class="tval"><span class="tlabel">BATTERY</span><span id="valBatPct">—%</span></span>
+          <span class="tval"><span class="tlabel">VOLTAGE</span><span id="valBatV">— V</span></span>
+          <span class="tval"><span class="tlabel">CURRENT</span><span id="valBatA">— A</span></span>
+          <span class="tval"><span class="tlabel">RSSI</span><span id="valRssi">—</span></span>
+          <span class="tval"><span class="tlabel">UPTIME</span><span id="valUptime">—</span></span>
+          <span class="tval"><span class="tlabel">CPU</span><span id="valCpu">—%</span></span>
+        </div>
+      </div>
+
+    </div>
+  </main>
+
+  <footer>
+    <span>rover-gcs</span>
+    <span id="statusMsg"></span>
+    <span id="telemHz">0.0 Hz</span>
+  </footer>
+
+  <div class="toast" id="toast" role="status" aria-live="polite">done</div>
+
+  <script src="js/instruments.js" defer></script>
+  <script src="js/telemetry.js" defer></script>
+  <script src="js/main.js" defer></script>
+</body>
+</html>
